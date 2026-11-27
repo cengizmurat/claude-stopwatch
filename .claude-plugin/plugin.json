@@ -1,6 +1,6 @@
 {
   "name": "tool-timings",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A side panel that shows how long each tool call and each subagent took in this session",
   "types": "./types/index.d.ts",
   "license": "MIT"

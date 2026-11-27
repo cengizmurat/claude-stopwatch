@@ -3,7 +3,7 @@
 **See where Claude Code spends its time.**
 
 A side panel for Claude Code that shows how long every tool call and every
-subagent takes: totals per tool, call counts, and the slowest calls, kept
+subagent takes: totals per tool, call counts, and the slowest tools, kept
 per session.
 
 The plugin is named `tool-timings`.
@@ -11,7 +11,7 @@ The plugin is named `tool-timings`.
 ```
  Tool timings
  ──────────────────────────────────────────────────────────────────
- 42 calls · 3m 18s tool time · 2 subagents
+ ⏱ 42 calls · 3m 18s tool time · 2 subagents · 🙋 1m 5s waiting for you
 
  Running now
  Bash                                                         12.4s
@@ -31,7 +31,7 @@ The plugin is named `tool-timings`.
  Plan                                              failed      8.9s
    Plan the database migration
 
- Slowest calls
+ Slowest tools
  1.  Bash                                                     48.2s
      npm run build
  2.  Bash                                                     31.5s
@@ -54,24 +54,24 @@ You do not need the panel open to see what is slow.
 now, with times that tick every second, and counts this turn:
 
 ```
-⏱ Working · this turn 6 calls, 14.2s in tools, 1 subagent           48.0s
-  Bash  npm run test:e2e                                             12.4s
-  Explore  Find the auth config                                      31.0s
+⏳ Working · this turn 6 calls, 14.2s in tools, 1 subagent          48.0s
+  💻 Bash  npm run test:e2e                                         12.4s
+  🤖 Explore  Find the auth config                                  31.0s
 ```
 
 When the turn ends, it becomes one line that sums the turn up, with
 **Details** (opens the panel) and **Hide** buttons:
 
 ```
-⏱ Last turn 1m 12s · 14 calls · 38.0s in tools · slowest Bash 31.0s  npm run build   Details  Hide
+✅ Last turn 1m 12s · 14 calls · 38.0s in tools · 🐢 Bash 31.0s  npm run build   Details  Hide
 ```
 
 **The status line** always shows the session totals and the slowest call.
 While something runs, it shows that first, with its live time:
 
 ```
-⏱ 42 calls · 3m 18s in tools · slowest Bash 48.2s
-⏱ Bash 12.4s, Explore 31.0s │ 42 calls · 3m 18s in tools
+⏱ 42 calls · 3m 18s in tools · 🐢 Bash 48.2s
+💻 Bash 12.4s, 🤖 Explore 31.0s │ 42 calls · 3m 18s in tools
 ```
 
 ## Features
@@ -82,10 +82,20 @@ While something runs, it shows that first, with its live time:
   time, number of calls, or slowest call.
 - **Subagents**: each subagent run with its type, its task, how long it
   ran, and whether it finished, failed or was stopped.
-- **Slowest calls**: the 10 slowest single calls, with the command, file or
+- **Waiting for you**: a section of its own for the time Claude waits on
+  you: ❓ questions (`AskUserQuestion`), 🔐 permission prompts (from the
+  prompt to the moment the tool starts) and 📜 plan approvals. It shows
+  totals per kind and your 5 most recent waits, and marks a "no" at a
+  prompt as declined. This time is not counted as tool time.
+- **Slowest tools**: the 10 slowest single tool calls, with the command, file or
   pattern they used. A call made inside a subagent shows the subagent type
   in brackets.
 - **Running now**: calls that have started and not finished yet.
+- **Colors and emojis**: each tool has an emoji (💻 Bash, 📖 Read,
+  📝 Edit, 🔍 Grep, 🌐 web, 🤖 Agent, 🔌 MCP tools). Times are green when
+  fast (under 2s), yellow in between, and red when slow (15s or more).
+  Subagents show ✅ done, ❌ failed, 🛑 stopped or ⏳ running. Colors use your
+  theme's own colors, so they work in light and dark themes.
 - **Fair numbers**: tool times come from Claude Code's own `duration_ms`,
   so time spent waiting at a permission prompt is not counted.
 - **One log per session**: a resumed session shows its earlier numbers
@@ -125,6 +135,8 @@ window is too narrow for it to open on its own:
 | `/tool-timings reset` | Clears the log of the current session. |
 | `/tool-timings band off` | Stops using the band above the prompt, in every session. |
 | `/tool-timings band on` | Uses the band again. |
+| `/tool-timings emoji off` | Draws plain text with no emojis, in every session. |
+| `/tool-timings emoji on` | Draws emojis again. |
 
 The panel also has a button at the bottom to clear the current session's
 log.

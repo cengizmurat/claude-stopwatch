@@ -26,9 +26,11 @@ function engine(on: On, sessionId = 'sess-1') {
   on('classic.PostToolUse', () => ({}))
   on('classic.PostToolUseFailure', () => ({}))
   on('classic.SubagentStop', () => ({}))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
 }
 
-test('the panel shows totals per tool, subagents and the slowest calls', async ($, on) => {
+test('the panel shows totals per tool, subagents and the slowest tools', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   engine(on)
@@ -77,7 +79,7 @@ test('the panel shows totals per tool, subagents and the slowest calls', async (
 
     expect((await ui.find({ type: 'Text', text: /^4$/ }))?.text).toBe('4')
     expect((await ui.find({ type: 'Text', text: /^6\.3s$/ }))?.text).toBe('6.3s')
-    expect(await ui.find({ type: 'Text', text: /^ 1 failed$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /1 failed$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Find the config/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /^1m 5s$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /npm run build/ })).toBeTruthy()
@@ -175,7 +177,7 @@ test('long MCP names and paths are shortened', async ($, on) => {
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ type: 'Text', text: /^register_repo_root claude-code-remote$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^register_repo_root$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /^ claude-code-remote$/ })).toBeTruthy()
     expect((await ui.find({ type: 'Text', text: /register\.tsx$/ }))?.text).toBe('…/hooks/register.tsx')
     expect(await ui.find({ type: 'Text', text: /^git remote add origin https:\/\/github\.com\/a\/b\/c\/d$/ })).toBeTruthy()

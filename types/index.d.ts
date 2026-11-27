@@ -24,6 +24,38 @@ export type RunningCall = {
   label: string
   startedAt: number
   agentType?: string
+  /** When a permission prompt for this call was shown to the person. */
+  askedAt?: number
+}
+
+/** What Claude waited on the person for. */
+export type WaitKind = 'question' | 'permission' | 'plan'
+
+/** One time Claude waited for the person. */
+export type WaitRecord = {
+  id: string
+  kind: WaitKind
+  /** The question, or the tool and its command or file. */
+  label: string
+  ms: number
+  at: number
+  /** `declined`: the person said no to a permission prompt. */
+  outcome: 'answered' | 'declined'
+}
+
+/** Totals for one kind of wait. */
+export type WaitStat = {
+  count: number
+  totalMs: number
+  maxMs: number
+}
+
+/** The times Claude waited for the person in one session. */
+export type WaitLog = {
+  totalMs: number
+  kinds: Partial<Record<WaitKind, WaitStat>>
+  /** The most recent waits, newest last. */
+  recent: WaitRecord[]
 }
 
 /** One subagent run. */
@@ -46,6 +78,8 @@ export type TimingLog = {
   slowest: CallRecord[]
   running: Record<string, RunningCall>
   agents: AgentRecord[]
+  /** Absent in logs saved before waits were timed. */
+  waits?: WaitLog
 }
 
 export type SortKey = 'total' | 'count' | 'max'
@@ -74,6 +108,8 @@ declare module 'claude-code' {
       sort: SortKey
       turn: TurnStats | null
       band: BandMode
+      /** Whether emojis are drawn next to tools, headings and states. */
+      emoji: BandMode
     }
   }
 }
