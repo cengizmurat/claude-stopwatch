@@ -1,6 +1,6 @@
 {
   "name": "tool-timings",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "A side panel that shows how long each tool call and each subagent took in this session",
   "author": {
     "name": "cengizmurat",

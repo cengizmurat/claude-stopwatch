@@ -11,7 +11,7 @@ The plugin is named `tool-timings`.
 ```
  Tool timings
  ──────────────────────────────────────────────────────────────────
- ⏱ 42 calls · 3m 18s tool time · 2 subagents · 🙋 1m 5s waiting for you
+ ⏱ 42 calls · 3m 18s tool time · 🧠 2m 4s thinking · 🤖 2 subagents 31.0s · 🙋 1m 5s waiting for you
 
  By tool
  Tool                    Calls    Total  Share     Avg      Max
@@ -78,6 +78,14 @@ While something runs, it shows that first, with its live time:
   first.
 - **Subagents**: each subagent run with its type, its task, how long it
   ran, and whether it finished, failed or was stopped.
+- **Thinking**: 🧠 the time the agent spends on its own model requests
+  (reading, reasoning and writing), from each request to the end of its
+  response. It is in the panel's top line, the band and the status line.
+  While Claude thinks, the band shows "💭 Thinking…" with the current
+  request's time.
+- **Subagents count once, as a whole**: a subagent's time runs from its
+  start to its end. Its own tool calls and model requests are not added to
+  tool time or thinking, and the `Agent` call that runs it is not tool time.
 - **Waiting for you**: a section of its own for the time Claude waits on
   you: ❓ questions (`AskUserQuestion`), 🔐 permission prompts (from the
   prompt to the moment the tool starts) and 📜 plan approvals. It shows

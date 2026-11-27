@@ -8,6 +8,7 @@ import type {
 
 import type {
   AgentRecord,
+  RunningCall,
   BandMode,
   CallRecord,
   TimingLog,
@@ -30,6 +31,22 @@ const KEEP_WAITS = 20
 const HUMAN_TOOLS: Record<string, WaitKind> = {
   AskUserQuestion: 'question',
   ExitPlanMode: 'plan',
+}
+
+// Tools that start a subagent: their time is the subagent's, counted once,
+// as a whole, under "Subagents", and never again as tool time.
+const AGENT_TOOLS = new Set(['Agent', 'Task'])
+
+/** A running call the band and the status line list on their own. */
+function isOwnCall(r: RunningCall): boolean {
+  return r.inSubagent !== true && !AGENT_TOOLS.has(r.tool)
+}
+
+/** How long the subagents started since `since` ran, the running ones so far. */
+function agentTime(value: TimingLog, since: number, now: number): number {
+  return value.agents
+    .filter(a => a.startedAt >= since)
+    .reduce((sum, a) => sum + (a.ms ?? Math.max(0, now - a.startedAt)), 0)
 }
 const FLUSH_MS = 2000
 
@@ -187,12 +204,19 @@ function statusText(
   now: number,
   useEmoji: boolean,
 ): string | undefined {
-  if (value.totalCalls === 0 && Object.keys(value.running).length === 0) {
+  const thinkMs = value.thinking?.totalMs ?? 0
+  const stepStart = currentStepStart(value)
+  if (
+    value.totalCalls === 0 &&
+    Object.keys(value.running).length === 0 &&
+    thinkMs === 0 &&
+    stepStart === undefined
+  ) {
     return undefined
   }
   const icon = (tool: string) => (useEmoji ? `${emojiOf(tool)} ` : '')
   const live = [
-    ...Object.values(value.running).map(
+    ...Object.values(value.running).filter(isOwnCall).map(
       r =>
         `${icon(r.tool)}${splitToolName(r.tool).name} ${formatMs(Math.max(0, now - r.startedAt))}`,
     ),
@@ -201,12 +225,19 @@ function statusText(
         `${useEmoji ? '🤖 ' : ''}${a.type} ${formatMs(Math.max(0, now - a.startedAt))}`,
     ),
   ]
-  const totals = `${value.totalCalls} ${value.totalCalls === 1 ? 'call' : 'calls'} · ${formatMs(value.totalMs)} in tools`
+  const thinking = useEmoji
+    ? `🧠 ${formatMs(thinkMs)}`
+    : `${formatMs(thinkMs)} thinking`
+  const totals = `${value.totalCalls} ${value.totalCalls === 1 ? 'call' : 'calls'} · ${formatMs(value.totalMs)} in tools · ${thinking}`
   const top = value.slowest[0]
   const slowest =
     top === undefined
       ? ''
       : ` · ${useEmoji ? '🐢' : 'slowest'} ${splitToolName(top.tool).name} ${formatMs(top.ms)}`
+  if (live.length === 0 && stepStart !== undefined) {
+    const ms = formatMs(Math.max(0, now - stepStart))
+    return `${useEmoji ? '💭' : '⏱'} thinking ${ms} │ ${totals}`
+  }
   if (live.length === 0) return `⏱ ${totals}${slowest}`
   const shown = live.slice(0, 2).join(', ')
   const more = live.length > 2 ? ` +${live.length - 2}` : ''
@@ -245,8 +276,10 @@ async function countForTurn(
   tool: string,
   label: string,
   ms: number,
+  agentType?: string,
 ): Promise<void> {
-  if (HUMAN_TOOLS[tool] !== undefined) return
+  if (HUMAN_TOOLS[tool] !== undefined || AGENT_TOOLS.has(tool)) return
+  if (agentType !== undefined) return
   try {
     await update($, turn, t => {
       if (t === null || t.isDone) return t
@@ -349,6 +382,27 @@ function endAgent(
   return found ? { ...value, agents } : value
 }
 
+/** A finished model request of the main conversation. */
+function addThinking(value: TimingLog, key: string, ms: number): TimingLog {
+  const old = value.thinking ?? { count: 0, totalMs: 0, maxMs: 0 }
+  const { [key]: _done, ...steps } = value.steps ?? {}
+  return {
+    ...value,
+    steps,
+    thinking: {
+      count: old.count + 1,
+      totalMs: old.totalMs + ms,
+      maxMs: Math.max(old.maxMs, ms),
+    },
+  }
+}
+
+/** When the main conversation's current model request started, if any. */
+function currentStepStart(value: TimingLog): number | undefined {
+  const starts = Object.values(value.steps ?? {}).map(step => step.startedAt)
+  return starts.length === 0 ? undefined : Math.max(...starts)
+}
+
 function emptyWaits(): WaitLog {
   return { totalMs: 0, kinds: {}, recent: [] }
 }
@@ -432,6 +486,24 @@ function finishTool(
   agentType: string | undefined,
 ): TimingLog {
   const run = value.running[id]
+  const { [id]: _gone, ...others } = value.running
+  if (AGENT_TOOLS.has(tool)) return { ...value, running: others }
+  if (run?.inSubagent === true || agentType !== undefined) {
+    // A step of a subagent: only a permission prompt in it, which is the
+    // person's time, is kept.
+    if (run?.askedAt === undefined) return { ...value, running: others }
+    return addWait(
+      { ...value, running: others },
+      {
+        id: `${id}:permission`,
+        kind: 'permission',
+        label: permissionLabel(tool, labelOf(input)),
+        ms: Math.max(0, now - ms - run.askedAt),
+        at: now,
+        outcome: 'answered',
+      },
+    )
+  }
   const kind = HUMAN_TOOLS[tool]
   if (kind !== undefined) {
     const { [id]: _done, ...running } = value.running
@@ -581,6 +653,13 @@ function textSummary(value: TimingLog): string {
       lines.push(`  ${formatMs(c.ms)}  ${c.tool}  ${c.label}`)
     }
   }
+  const thinking = value.thinking
+  if (thinking !== undefined && thinking.count > 0) {
+    lines.push(
+      '',
+      `Thinking (this agent's model requests): ${thinking.count} requests, ${formatMs(thinking.totalMs)} total, avg ${formatMs(thinking.totalMs / thinking.count)}, max ${formatMs(thinking.maxMs)}`,
+    )
+  }
   const waits = value.waits
   if (waits !== undefined && waits.recent.length > 0) {
     lines.push('', `Waiting for you: ${formatMs(waits.totalMs)} in all.`)
@@ -604,7 +683,7 @@ export const register: Register = on => {
     const sessionId = await sessionIdOf($)
     await useSession($, sessionId)
     // Nothing runs while a session starts: drop calls a reload left open.
-    await update($, log, value => ({ ...value, running: {} }))
+    await update($, log, value => ({ ...value, running: {}, steps: {} }))
     const savedBand = await $.store.get(BAND_STORE_KEY)
     await update($, band, () => (savedBand === 'off' ? 'off' : 'on'))
     const savedEmoji = await $.store.get(EMOJI_STORE_KEY)
@@ -719,7 +798,7 @@ export const register: Register = on => {
         e.agent_type,
       )
     })
-    await countForTurn($, e.tool_name, labelOf(e.tool_input), ms)
+    await countForTurn($, e.tool_name, labelOf(e.tool_input), ms, e.agent_type)
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -740,7 +819,26 @@ export const register: Register = on => {
         e.agent_type,
       )
     })
-    await countForTurn($, e.tool_name, labelOf(e.tool_input), ms)
+    await countForTurn($, e.tool_name, labelOf(e.tool_input), ms, e.agent_type)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // PreToolUse does not say which loop a call runs in; tool.check does. A
+  // call inside a subagent is marked, so it counts as part of the subagent.
+  // `next(e)` only reads the verdict, and it is passed on unchanged.
+  on('tool.check', async ($, e, next) => {
+    const id = e.tool_use_id
+    if (e.agentId !== undefined && id !== undefined) {
+      await change($, await sessionIdOf($), value => {
+        const run = value.running[id]
+        if (run === undefined || run.inSubagent === true) return value
+        return {
+          ...value,
+          running: { ...value.running, [id]: { ...run, inSubagent: true } },
+        }
+      })
+    }
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -779,6 +877,44 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // Thinking: each model request of the main conversation, from the request
+  // to the end of its response. The response is passed on untouched, and a
+  // subagent's requests go straight through, uncounted.
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined) return yield* next(e)
+
+    const key = `${e.turnId}:${e.index}`
+    let startedAt: number | undefined
+    try {
+      const at = await $.clock.now()
+      startedAt = at
+      await change($, await sessionIdOf($), value => ({
+        ...value,
+        steps: { ...(value.steps ?? {}), [key]: { startedAt: at } },
+      }))
+    } catch {
+      // Timing is best effort: the request goes out either way.
+    }
+
+    try {
+      return yield* next(e)
+    } finally {
+      if (startedAt !== undefined) {
+        try {
+          const ms = Math.max(0, (await $.clock.now()) - startedAt)
+          await change($, await sessionIdOf($), value =>
+            addThinking(value, key, ms),
+          )
+          await update($, turn, t =>
+            t === null || t.isDone ? t : { ...t, thinkMs: (t.thinkMs ?? 0) + ms },
+          )
+        } catch {
+          // As above.
+        }
+      }
+    }
+  })
+
   // A new turn of the main conversation starts its own counts for the band.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
@@ -787,6 +923,7 @@ export const register: Register = on => {
         startedAt,
         calls: 0,
         toolMs: 0,
+        thinkMs: 0,
         agents: 0,
         isDone: false,
         isHidden: false,
@@ -804,10 +941,15 @@ export const register: Register = on => {
       const sessionId = await sessionIdOf($)
       const now = await $.clock.now()
       await change($, sessionId, value => {
-        if (Object.keys(value.running).length === 0) return value
+        if (
+          Object.keys(value.running).length === 0 &&
+          Object.keys(value.steps ?? {}).length === 0
+        ) {
+          return value
+        }
         // A prompt or question still open when the turn ended was turned
         // down (a "no" at a permission prompt ends the turn).
-        let done: TimingLog = { ...value, running: {} }
+        let done: TimingLog = { ...value, running: {}, steps: {} }
         for (const [id, r] of Object.entries(value.running)) {
           const kind = HUMAN_TOOLS[r.tool]
           if (kind !== undefined) {
@@ -905,6 +1047,7 @@ export const register: Register = on => {
 
     const live = [
       ...Object.entries(value.running)
+        .filter(([, r]) => isOwnCall(r))
         .sort((a, b) => a[1].startedAt - b[1].startedAt)
         .map(([id, r]) => ({
           key: `call-${id}`,
@@ -928,6 +1071,7 @@ export const register: Register = on => {
 
     if (isLive) {
       const shown = live.slice(0, BAND_ROWS)
+      const stepStart = currentStepStart(value)
       const hasMore = live.length > shown.length
       // Rows under the header: never fewer than the most this turn has
       // shown, so the band does not jump up and down as calls come and go.
@@ -951,11 +1095,13 @@ export const register: Register = on => {
                     <Text color="suggestion">{`${t.calls} ${t.calls === 1 ? 'call' : 'calls'}`}</Text>
                     <Text dimColor>, </Text>
                     <Text color="claude">{formatMs(t.toolMs)}</Text>
-                    <Text dimColor> in tools</Text>
+                    <Text dimColor> in tools, </Text>
+                    <Text color="planMode">{`${icon('🧠')}${formatMs(t.thinkMs ?? 0)}`}</Text>
+                    <Text dimColor> thinking</Text>
                     {t.agents > 0 ? (
                       <Text>
                         <Text dimColor>, </Text>
-                        <Text color="merged">{`${t.agents} ${t.agents === 1 ? 'subagent' : 'subagents'}`}</Text>
+                        <Text color="merged">{`${icon('🤖')}${t.agents} ${t.agents === 1 ? 'subagent' : 'subagents'} ${formatMs(agentTime(value, t.startedAt, now))}`}</Text>
                       </Text>
                     ) : (
                       ''
@@ -971,7 +1117,16 @@ export const register: Register = on => {
             </Box>
           </Box>
           {shown.length === 0 && (
-            <Text dimColor wrap="truncate-end">{`  ${useEmoji ? '💭 ' : ''}Thinking…`}</Text>
+            <Box flexDirection="row" width={width}>
+              <Box width={width - NUM} flexShrink={0} overflow="hidden">
+                <Text dimColor wrap="truncate-end">{`  ${useEmoji ? '💭 ' : ''}Thinking…`}</Text>
+              </Box>
+              <Box width={NUM} flexShrink={0} justifyContent="flex-end">
+                <Text color="planMode" tabular>
+                  {stepStart === undefined ? '' : formatMs(Math.max(0, now - stepStart))}
+                </Text>
+              </Box>
+            </Box>
           )}
           {shown.map(item => (
             <Box key={item.key} flexDirection="row" width={width}>
@@ -1011,6 +1166,8 @@ export const register: Register = on => {
             <Text color="success">{`${useEmoji ? '✅' : '⏱'} Last turn `}</Text>
             <Text bold color="success">{formatMs(t.durationMs ?? 0)}</Text>
             <Text dimColor> · </Text>
+            <Text color="planMode">{`${icon('🧠')}${formatMs(t.thinkMs ?? 0)}`}</Text>
+            <Text dimColor> thinking · </Text>
             <Text color="suggestion">{`${t.calls} ${t.calls === 1 ? 'call' : 'calls'}`}</Text>
             <Text dimColor> · </Text>
             <Text color="claude">{formatMs(t.toolMs)}</Text>
@@ -1018,7 +1175,7 @@ export const register: Register = on => {
             {t.agents > 0 ? (
               <Text>
                 <Text dimColor> · </Text>
-                <Text color="merged">{`${t.agents} ${t.agents === 1 ? 'subagent' : 'subagents'}`}</Text>
+                <Text color="merged">{`${icon('🤖')}${t.agents} ${t.agents === 1 ? 'subagent' : 'subagents'} ${formatMs(agentTime(value, t.startedAt, now))}`}</Text>
               </Text>
             ) : (
               ''
@@ -1153,8 +1310,14 @@ export const register: Register = on => {
           <Text dimColor>{value.totalCalls === 1 ? ' call · ' : ' calls · '}</Text>
           <Text bold color="claude">{formatMs(value.totalMs)}</Text>
           <Text dimColor> tool time · </Text>
+          <Text>{icon('🧠')}</Text>
+          <Text bold color="planMode">{formatMs(value.thinking?.totalMs ?? 0)}</Text>
+          <Text dimColor> thinking · </Text>
+          <Text>{icon('🤖')}</Text>
           <Text bold color="merged">{String(value.agents.length)}</Text>
-          <Text dimColor>{value.agents.length === 1 ? ' subagent · ' : ' subagents · '}</Text>
+          <Text dimColor>{value.agents.length === 1 ? ' subagent ' : ' subagents '}</Text>
+          <Text bold color="merged">{formatMs(agentTime(value, 0, now))}</Text>
+          <Text dimColor> · </Text>
           <Text>{icon('🙋')}</Text>
           <Text bold color="permission">{formatMs(waits?.totalMs ?? 0)}</Text>
           <Text dimColor> waiting for you</Text>

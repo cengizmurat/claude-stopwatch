@@ -73,7 +73,7 @@ test('while Claude works, the band and status line show what runs', async ($, on
     await ui.unmount()
   }
 
-  expect(statuses.at(-1)).toBe('💻 Bash 12.0s │ 1 call · 400ms in tools')
+  expect(statuses.at(-1)).toBe('💻 Bash 12.0s │ 1 call · 400ms in tools · 🧠 0ms')
 })
 
 test('after the turn, the band sums it up and can be hidden', async ($, on) => {
@@ -112,7 +112,7 @@ test('after the turn, the band sums it up and can be hidden', async ($, on) => {
     await ui.unmount()
   }
 
-  expect(statuses.at(-1)).toBe('⏱ 2 calls · 33.0s in tools · 🐢 Bash 31.0s')
+  expect(statuses.at(-1)).toBe('⏱ 2 calls · 33.0s in tools · 🧠 0ms · 🐢 Bash 31.0s')
 
   const ui = await $.ui.mount({ ...bandOf(false), surface: 'desktop' })
   await ui.press({ key: 'band-hide' })
@@ -166,7 +166,7 @@ test('"/tool-timings emoji off" draws plain text', async ($, on) => {
     presentation: { isFullscreen: false, columns: 100 },
   })
 
-  expect(statuses.at(-1)).toBe('⏱ 1 call · 100ms in tools · slowest Bash 100ms')
+  expect(statuses.at(-1)).toBe('⏱ 1 call · 100ms in tools · 0ms thinking · slowest Bash 100ms')
   const ui = await $.ui.mount({
     plugin: 'tool-timings',
     component: 'Pane',

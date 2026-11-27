@@ -26,6 +26,8 @@ export type RunningCall = {
   agentType?: string
   /** When a permission prompt for this call was shown to the person. */
   askedAt?: number
+  /** The call runs inside a subagent: it is part of the subagent's time. */
+  inSubagent?: boolean
 }
 
 /** What Claude waited on the person for. */
@@ -60,6 +62,22 @@ export type WaitLog = {
   recent: WaitRecord[]
 }
 
+/**
+ * The time the main conversation's agent spent on model requests: reading,
+ * reasoning and writing, from each request to the end of its response.
+ * Subagents' requests are not counted.
+ */
+export type ThinkLog = {
+  count: number
+  totalMs: number
+  maxMs: number
+}
+
+/** A model request of the main conversation under way. */
+export type RunningStep = {
+  startedAt: number
+}
+
 /** One subagent run. */
 export type AgentRecord = {
   id: string
@@ -82,6 +100,10 @@ export type TimingLog = {
   agents: AgentRecord[]
   /** Absent in logs saved before waits were timed. */
   waits?: WaitLog
+  /** Absent in logs saved before thinking was timed. */
+  thinking?: ThinkLog
+  /** Model requests under way, by turn id and step index. */
+  steps?: Record<string, RunningStep>
 }
 
 /** The numbers of the current (or last) turn of the main conversation. */
@@ -91,6 +113,8 @@ export type TurnStats = {
   durationMs?: number
   calls: number
   toolMs: number
+  /** Model time of the main conversation in this turn. */
+  thinkMs?: number
   agents: number
   slowest?: { tool: string; label: string; ms: number }
   isDone: boolean
