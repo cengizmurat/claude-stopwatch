@@ -50,11 +50,30 @@ export type TimingLog = {
 
 export type SortKey = 'total' | 'count' | 'max'
 
+/** The numbers of the current (or last) turn of the main conversation. */
+export type TurnStats = {
+  startedAt: number
+  /** Wall-clock length of the turn, set when it ends. */
+  durationMs?: number
+  calls: number
+  toolMs: number
+  agents: number
+  slowest?: { tool: string; label: string; ms: number }
+  isDone: boolean
+  /** The person hid this turn's summary in the band. */
+  isHidden: boolean
+}
+
+/** Whether the band above the prompt is used at all. */
+export type BandMode = 'on' | 'off'
+
 declare module 'claude-code' {
   interface PluginState {
     'tool-timings': {
       log: Shaped<TimingLog>
       sort: SortKey
+      turn: TurnStats | null
+      band: BandMode
     }
   }
 }

@@ -1,12 +1,19 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type {
+  EngineInterface,
+  Register,
+  RenderElement,
+  Timer,
+} from 'claude-code'
 
 import type {
   AgentRecord,
+  BandMode,
   CallRecord,
   SortKey,
   TimingLog,
   ToolStat,
+  TurnStats,
 } from '../types'
 
 const PANE = 'tool-timings'
@@ -24,6 +31,13 @@ const log = atom({ plugin: 'tool-timings', key: 'log' } as const, blank(''), {
   shape: SHAPE,
 })
 const sort = atom({ plugin: 'tool-timings', key: 'sort' } as const, 'total')
+const turn = atom(
+  { plugin: 'tool-timings', key: 'turn' } as const,
+  null as TurnStats | null,
+)
+const band = atom({ plugin: 'tool-timings', key: 'band' } as const, 'on' as BandMode)
+const BAND_STORE_KEY = 'bandMode'
+const BAND_ROWS = 3
 
 type Dollar = EngineInterface
 
@@ -122,8 +136,87 @@ async function change(
       fn(value.sessionId === sessionId ? value : blank(sessionId, Date.now())),
     )
     scheduleFlush($)
+    await refreshLive($)
   } catch {
     // A timing that fails to record must never stop the work it times.
+  }
+}
+
+// ---------- live parts: the status line and the ticking clock ----------
+
+// Ticks once a second while a call or a subagent runs, so the elapsed times
+// in the band, the panel and the status line move. A reload stops it.
+let ticker: Timer | undefined
+
+function runningAgents(value: TimingLog): AgentRecord[] {
+  return value.agents.filter(a => a.status === 'running')
+}
+
+function statusText(value: TimingLog, now: number): string | undefined {
+  if (value.totalCalls === 0 && Object.keys(value.running).length === 0) {
+    return undefined
+  }
+  const live = [
+    ...Object.values(value.running).map(
+      r => `${splitToolName(r.tool).name} ${formatMs(Math.max(0, now - r.startedAt))}`,
+    ),
+    ...runningAgents(value).map(
+      a => `${a.type} ${formatMs(Math.max(0, now - a.startedAt))}`,
+    ),
+  ]
+  const totals = `${value.totalCalls} ${value.totalCalls === 1 ? 'call' : 'calls'} · ${formatMs(value.totalMs)} in tools`
+  const top = value.slowest[0]
+  const slowest =
+    top === undefined
+      ? ''
+      : ` · slowest ${splitToolName(top.tool).name} ${formatMs(top.ms)}`
+  if (live.length === 0) return `⏱ ${totals}${slowest}`
+  const shown = live.slice(0, 2).join(', ')
+  const more = live.length > 2 ? ` +${live.length - 2}` : ''
+  return `⏱ ${shown}${more} │ ${totals}`
+}
+
+async function updateStatus($: Dollar): Promise<void> {
+  const value = await read($, log)
+  $.ui.status(statusText(value, await $.clock.now()))
+}
+
+async function refreshLive($: Dollar): Promise<void> {
+  const value = await read($, log)
+  const isRunning =
+    Object.keys(value.running).length > 0 || runningAgents(value).length > 0
+  if (isRunning && ticker === undefined) {
+    ticker = $.clock.every(1000, () => {
+      $.ui.invalidate('ui.render')
+      void updateStatus($).catch(() => undefined)
+    })
+  } else if (!isRunning && ticker !== undefined) {
+    ticker.cancel()
+    ticker = undefined
+  }
+  $.ui.status(statusText(value, await $.clock.now()))
+}
+
+/** Adds a finished call to the numbers of the turn under way. */
+async function countForTurn(
+  $: Dollar,
+  tool: string,
+  label: string,
+  ms: number,
+): Promise<void> {
+  try {
+    await update($, turn, t => {
+      if (t === null || t.isDone) return t
+      const isSlowest = t.slowest === undefined || ms > t.slowest.ms
+      return {
+        ...t,
+        calls: t.calls + 1,
+        toolMs: t.toolMs + ms,
+        slowest: isSlowest ? { tool, label, ms } : t.slowest,
+      }
+    })
+  } catch {
+    // Best effort, like every other count here.
   }
 }
 
@@ -148,8 +241,8 @@ function labelOf(input: unknown): string {
   for (const name of LABEL_FIELDS) {
     const value = fields[name]
     if (typeof value === 'string' && value.trim() !== '') {
-      const line = value.replace(/\s+/g, ' ').trim()
-      return line.length > 80 ? `${line.slice(0, 79)}…` : line
+      const line = shortenPaths(value.replace(/\s+/g, ' ').trim())
+      return line.length > 120 ? `${line.slice(0, 119)}…` : line
     }
   }
   return ''
@@ -214,6 +307,23 @@ function endAgent(
 }
 
 // ---------- drawing helpers ----------
+
+/** `/a/b/c/d/file.ts` becomes `…/d/file.ts`, inside any text. */
+function shortenPaths(text: string): string {
+  // Not after a letter, ':' or '/', so `https://` links and `a/b` stay whole.
+  return text.replace(/(?<![\w:/.~])(?:~|\.{1,2})?\/[^\s'"`]+/g, path => {
+    const parts = path.split('/').filter(part => part !== '')
+    return parts.length > 3 ? `…/${parts.slice(-2).join('/')}` : path
+  })
+}
+
+/** `mcp__server__tool` is shown as the tool, then its server. */
+function splitToolName(name: string): { name: string; server: string } {
+  if (!name.startsWith('mcp__')) return { name, server: '' }
+  const [, server = '', ...rest] = name.split('__')
+  const tool = rest.join('__')
+  return tool === '' ? { name, server: '' } : { name: tool, server }
+}
 
 function formatMs(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -284,12 +394,15 @@ export const register: Register = on => {
     await useSession($, sessionId)
     // Nothing runs while a session starts: drop calls a reload left open.
     await update($, log, value => ({ ...value, running: {} }))
+    const savedBand = await $.store.get(BAND_STORE_KEY)
+    await update($, band, () => (savedBand === 'off' ? 'off' : 'on'))
     await $.command.register({
       name: 'tool-timings',
       description:
-        'Open the tool timings panel. Args: "summary" prints it, "reset" clears this session',
+        'Open the tool timings panel. Args: "summary", "reset", "band on", "band off"',
     })
     void $.ui.open({ id: PANE, title: TITLE })
+    await refreshLive($)
 
     return next(e)
   })
@@ -298,6 +411,10 @@ export const register: Register = on => {
     await flush($)
     loadedSession = ''
     sessionIdCache = ''
+    ticker?.cancel()
+    ticker = undefined
+    await update($, turn, () => null)
+    $.ui.status(undefined)
 
     return next(e)
   })
@@ -309,8 +426,21 @@ export const register: Register = on => {
 
     if (arg === 'reset') {
       await update($, log, () => blank(sessionId, Date.now()))
+      await update($, turn, () => null)
       await $.store.delete(storeKey(sessionId))
+      await refreshLive($)
       return { text: 'Tool timings for this session were cleared.' }
+    }
+    if (arg === 'band off' || arg === 'band on') {
+      const mode: BandMode = arg === 'band off' ? 'off' : 'on'
+      await update($, band, () => mode)
+      await $.store.set(BAND_STORE_KEY, mode)
+      return {
+        text:
+          mode === 'off'
+            ? 'The tool timings band above the prompt is off. "/tool-timings band on" brings it back.'
+            : 'The tool timings band above the prompt is on.',
+      }
     }
     if (arg === 'summary') {
       return { text: textSummary(await read($, log), await read($, sort)) }
@@ -341,9 +471,10 @@ export const register: Register = on => {
 
   on('classic.PostToolUse', async ($, e, next) => {
     const now = await $.clock.now()
+    let ms = 0
     await change($, await sessionIdOf($), value => {
       const started = value.running[e.tool_use_id]?.startedAt ?? now
-      const ms = e.duration_ms ?? now - started
+      ms = e.duration_ms ?? now - started
       return finishCall(
         value,
         e.tool_use_id,
@@ -355,15 +486,17 @@ export const register: Register = on => {
         e.agent_type,
       )
     })
+    await countForTurn($, e.tool_name, labelOf(e.tool_input), ms)
 
     return next(e)
   }).catch(($, e, next) => next(e))
 
   on('classic.PostToolUseFailure', async ($, e, next) => {
     const now = await $.clock.now()
+    let ms = 0
     await change($, await sessionIdOf($), value => {
       const started = value.running[e.tool_use_id]?.startedAt ?? now
-      const ms = e.duration_ms ?? now - started
+      ms = e.duration_ms ?? now - started
       return finishCall(
         value,
         e.tool_use_id,
@@ -375,6 +508,7 @@ export const register: Register = on => {
         e.agent_type,
       )
     })
+    await countForTurn($, e.tool_name, labelOf(e.tool_input), ms)
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -392,6 +526,23 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // A new turn of the main conversation starts its own counts for the band.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      const startedAt = await $.clock.now()
+      await update($, turn, () => ({
+        startedAt,
+        calls: 0,
+        toolMs: 0,
+        agents: 0,
+        isDone: false,
+        isHidden: false,
+      }))
+    }
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // A call the person refused at the prompt never reaches PostToolUse. When
   // the main turn ends, nothing of its own is still running.
   on('turn.complete', async ($, e, next) => {
@@ -401,6 +552,9 @@ export const register: Register = on => {
         Object.keys(value.running).length === 0
           ? value
           : { ...value, running: {} },
+      )
+      await update($, turn, t =>
+        t === null ? t : { ...t, isDone: true, durationMs: e.durationMs },
       )
     }
 
@@ -426,6 +580,9 @@ export const register: Register = on => {
           -KEEP_AGENTS,
         ),
       }))
+      await update($, turn, t =>
+        t === null || t.isDone ? t : { ...t, agents: t.agents + 1 },
+      )
     }
 
     return result
@@ -451,6 +608,139 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // ---------- the band above the prompt ----------
+  // While Claude works: what runs now, with live times, and this turn's
+  // counts. After the turn: one line that sums the turn up.
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey || (await read($, band)) === 'off') return next(e)
+
+    const value = await read($, log)
+    const t = await read($, turn)
+    const now = await $.clock.now()
+    const width = Math.max(30, e.props.bodyColumns)
+    const NUM = 8
+
+    const live = [
+      ...Object.entries(value.running)
+        .sort((a, b) => a[1].startedAt - b[1].startedAt)
+        .map(([id, r]) => ({
+          key: `call-${id}`,
+          name: splitToolName(r.tool).name,
+          detail: shortenPaths(r.label),
+          ms: now - r.startedAt,
+        })),
+      ...runningAgents(value).map(a => ({
+        key: `agent-${a.id}`,
+        name: a.type,
+        detail: a.description,
+        ms: now - a.startedAt,
+      })),
+    ]
+    const isLive = live.length > 0 || (e.props.isWorking && t !== null && !t.isDone)
+    const { Box, Text, Button } = $.ui.resolve(e)
+
+    if (isLive) {
+      const counts =
+        t === null
+          ? ''
+          : ` · this turn ${t.calls} ${t.calls === 1 ? 'call' : 'calls'}, ${formatMs(t.toolMs)} in tools${t.agents > 0 ? `, ${t.agents} ${t.agents === 1 ? 'subagent' : 'subagents'}` : ''}`
+      const shown = live.slice(0, BAND_ROWS)
+
+      return (
+        <Box flexDirection="column" width={width}>
+          <Box flexDirection="row" width={width}>
+            <Box width={width - NUM} flexShrink={0} overflow="hidden">
+              <Text wrap="truncate-end">
+                <Text bold>⏱ Working</Text>
+                <Text dimColor>{counts}</Text>
+              </Text>
+            </Box>
+            <Box width={NUM} flexShrink={0} justifyContent="flex-end">
+              <Text dimColor tabular>
+                {t === null ? '' : formatMs(Math.max(0, now - t.startedAt))}
+              </Text>
+            </Box>
+          </Box>
+          {shown.map(item => (
+            <Box key={item.key} flexDirection="row" width={width}>
+              <Box width={width - NUM} flexShrink={0} overflow="hidden">
+                <Text wrap="truncate-end">
+                  <Text color="yellow">{`  ${item.name}`}</Text>
+                  <Text dimColor>{item.detail === '' ? '' : `  ${item.detail}`}</Text>
+                </Text>
+              </Box>
+              <Box width={NUM} flexShrink={0} justifyContent="flex-end">
+                <Text color="yellow" tabular>
+                  {formatMs(Math.max(0, item.ms))}
+                </Text>
+              </Box>
+            </Box>
+          ))}
+          {live.length > shown.length && (
+            <Text dimColor>{`  +${live.length - shown.length} more running`}</Text>
+          )}
+        </Box>
+      )
+    }
+
+    const hasSummary =
+      t !== null && t.isDone && !t.isHidden && (t.calls > 0 || t.agents > 0)
+    if (!hasSummary) return next(e)
+
+    const parts = [
+      `${t.calls} ${t.calls === 1 ? 'call' : 'calls'}`,
+      `${formatMs(t.toolMs)} in tools`,
+      ...(t.agents > 0
+        ? [`${t.agents} ${t.agents === 1 ? 'subagent' : 'subagents'}`]
+        : []),
+    ]
+    const slow = t.slowest
+
+    return (
+      <Box flexDirection="row" width={width} alignItems="center">
+        <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          <Text wrap="truncate-end">
+            <Text dimColor>⏱ Last turn </Text>
+            <Text bold>{formatMs(t.durationMs ?? 0)}</Text>
+            <Text dimColor>{` · ${parts.join(' · ')}`}</Text>
+            {slow === undefined ? (
+              ''
+            ) : (
+              <Text>
+                <Text dimColor> · slowest </Text>
+                <Text>{splitToolName(slow.tool).name}</Text>
+                <Text bold>{` ${formatMs(slow.ms)}`}</Text>
+                <Text dimColor>
+                  {slow.label === '' ? '' : `  ${shortenPaths(slow.label)}`}
+                </Text>
+              </Text>
+            )}
+          </Text>
+        </Box>
+        <Box flexShrink={0} flexDirection="row" gap={1} marginLeft={1}>
+          <Button
+            key="band-details"
+            plain
+            label="Details"
+            onPress={async () => {
+              await $.ui.open({ id: PANE, title: TITLE })
+            }}
+          />
+          <Button
+            key="band-hide"
+            plain
+            dimColor
+            label="Hide"
+            onPress={() =>
+              update($, turn, v => (v === null ? v : { ...v, isHidden: true }))
+            }
+          />
+        </Box>
+      </Box>
+    )
+  })
+
   // ---------- the panel ----------
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -458,9 +748,18 @@ export const register: Register = on => {
     const value = await read($, log)
     const by = await read($, sort)
     const now = await $.clock.now()
-    const columns = e.viewport?.columns ?? 60
-    const isNarrow = columns < 52
-    const num = isNarrow ? 7 : 9
+
+    // Every column has a fixed width taken from the panel's own width, so a
+    // long name is cut with "…" and never pushes the numbers out of line.
+    const width = Math.max(32, (e.props.bodyColumns ?? e.viewport?.columns ?? 60) - 2)
+    const CALLS = 6
+    const NUM = 8
+    const SHARE = 6
+    const RANK = 4
+    const showAvg = width >= 56
+    const showShare = width >= 66
+    const nameWidth =
+      width - CALLS - NUM * (showAvg ? 3 : 2) - (showShare ? SHARE : 0)
 
     const tools = sortedTools(value, by)
     const running = Object.entries(value.running).sort(
@@ -469,28 +768,61 @@ export const register: Register = on => {
     const agents = [...value.agents].reverse()
     const isEmpty = value.totalCalls === 0 && agents.length === 0
 
-    const cell = (text: string, width: number, bold = false) => (
-      <Box width={width} justifyContent="flex-end">
-        <Text bold={bold} tabular wrap="truncate-end">
+    const num = (
+      text: string,
+      cells: number,
+      style: { bold?: boolean; dim?: boolean; color?: string } = {},
+    ) => (
+      <Box width={cells} flexShrink={0} justifyContent="flex-end">
+        <Text
+          tabular
+          bold={style.bold}
+          dimColor={style.dim}
+          color={style.color}
+          wrap="truncate-end"
+        >
           {text}
         </Text>
       </Box>
     )
-    const heading = (text: string) => (
-      <Box marginTop={1}>
-        <Text bold>{text}</Text>
+    const toolName = (tool: string, color?: string) => {
+      const parts = splitToolName(tool)
+      return (
+        <Text color={color}>
+          {parts.name}
+          {parts.server === '' ? '' : <Text dimColor>{` ${parts.server}`}</Text>}
+        </Text>
+      )
+    }
+    const detail = (key: string, text: string, indent: number) =>
+      text === '' ? null : (
+        <Box key={key} width={width} paddingLeft={indent} overflow="hidden">
+          <Text dimColor wrap="truncate-end">
+            {shortenPaths(text)}
+          </Text>
+        </Box>
+      )
+    const heading = (title: string, right: RenderElement | null = null) => (
+      <Box
+        marginTop={1}
+        width={width}
+        flexDirection="row"
+        justifyContent="space-between"
+      >
+        <Text bold>{title}</Text>
+        {right}
       </Box>
     )
 
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text>
+        <Text wrap="truncate-end">
           <Text bold>{String(value.totalCalls)}</Text>
-          <Text dimColor> calls · </Text>
+          <Text dimColor>{value.totalCalls === 1 ? ' call · ' : ' calls · '}</Text>
           <Text bold>{formatMs(value.totalMs)}</Text>
           <Text dimColor> tool time · </Text>
           <Text bold>{String(value.agents.length)}</Text>
-          <Text dimColor> subagents</Text>
+          <Text dimColor>{value.agents.length === 1 ? ' subagent' : ' subagents'}</Text>
         </Text>
 
         {isEmpty && (
@@ -503,109 +835,120 @@ export const register: Register = on => {
 
         {running.length > 0 && heading('Running now')}
         {running.map(([id, r]) => (
-          <Box key={`run-${id}`} flexDirection="row">
-            <Box flexGrow={1} flexShrink={1}>
-              <Text color="yellow" wrap="truncate-end">
-                {r.tool}
-                {r.label === '' ? '' : `  ${r.label}`}
-              </Text>
+          <Box key={`run-${id}`} flexDirection="column">
+            <Box flexDirection="row" width={width}>
+              <Box width={width - NUM} flexShrink={0} overflow="hidden">
+                <Text wrap="truncate-end">{toolName(r.tool, 'yellow')}</Text>
+              </Box>
+              {num(formatMs(Math.max(0, now - r.startedAt)), NUM, {
+                color: 'yellow',
+              })}
             </Box>
-            {cell(formatMs(Math.max(0, now - r.startedAt)), num)}
+            {detail(`run-d-${id}`, r.label, 2)}
           </Box>
         ))}
 
-        {tools.length > 0 && (
-          <Box marginTop={1} flexDirection="row" justifyContent="space-between">
-            <Text bold>By tool</Text>
+        {tools.length > 0 &&
+          heading(
+            'By tool',
             <Button
               key="sort"
               plain
               dimColor
               label={`sorted by ${SORT_LABEL[by]}`}
               onPress={() => update($, sort, s => NEXT_SORT[s])}
-            />
-          </Box>
-        )}
+            />,
+          )}
         {tools.length > 0 && (
-          <Box flexDirection="row">
-            <Box flexGrow={1} flexShrink={1}>
+          <Box flexDirection="row" width={width}>
+            <Box width={nameWidth} flexShrink={0}>
               <Text dimColor>Tool</Text>
             </Box>
-            <Box width={6} justifyContent="flex-end">
-              <Text dimColor>Calls</Text>
-            </Box>
-            <Box width={num} justifyContent="flex-end">
-              <Text dimColor>Total</Text>
-            </Box>
-            {!isNarrow && (
-              <Box width={num} justifyContent="flex-end">
-                <Text dimColor>Avg</Text>
-              </Box>
-            )}
-            <Box width={num} justifyContent="flex-end">
-              <Text dimColor>Max</Text>
-            </Box>
+            {num('Calls', CALLS, { dim: true })}
+            {num('Total', NUM, { dim: true })}
+            {showShare && num('Share', SHARE, { dim: true })}
+            {showAvg && num('Avg', NUM, { dim: true })}
+            {num('Max', NUM, { dim: true })}
           </Box>
         )}
         {tools.map(([tool, s]) => (
-          <Box key={`tool-${tool}`} flexDirection="row">
-            <Box flexGrow={1} flexShrink={1}>
+          <Box key={`tool-${tool}`} flexDirection="row" width={width}>
+            <Box width={nameWidth} flexShrink={0} overflow="hidden">
               <Text wrap="truncate-end">
-                {tool}
-                {s.errors > 0 ? ` (${s.errors} failed)` : ''}
+                {toolName(tool)}
+                {s.errors > 0 ? (
+                  <Text color="red">{` ${s.errors} failed`}</Text>
+                ) : (
+                  ''
+                )}
               </Text>
             </Box>
-            {cell(String(s.count), 6)}
-            {cell(formatMs(s.totalMs), num, true)}
-            {!isNarrow && cell(formatMs(s.totalMs / s.count), num)}
-            {cell(formatMs(s.maxMs), num)}
+            {num(String(s.count), CALLS)}
+            {num(formatMs(s.totalMs), NUM, { bold: true })}
+            {showShare &&
+              num(
+                `${value.totalMs === 0 ? 0 : Math.round((s.totalMs / value.totalMs) * 100)}%`,
+                SHARE,
+                { dim: true },
+              )}
+            {showAvg && num(formatMs(s.totalMs / s.count), NUM)}
+            {num(formatMs(s.maxMs), NUM)}
           </Box>
         ))}
 
         {agents.length > 0 && heading('Subagents')}
         {agents.map(a => (
-          <Box key={`agent-${a.id}`} flexDirection="row">
-            <Box flexGrow={1} flexShrink={1}>
-              <Text wrap="truncate-end">
-                <Text bold>{a.type}</Text>
-                <Text dimColor>{a.description === '' ? '' : `  ${a.description}`}</Text>
-              </Text>
-            </Box>
-            {a.status === 'running' ? (
-              <Box width={num + 8} justifyContent="flex-end">
-                <Text color="yellow" tabular>
-                  {`running ${formatMs(Math.max(0, now - a.startedAt))}`}
+          <Box key={`agent-${a.id}`} flexDirection="column">
+            <Box flexDirection="row" width={width}>
+              <Box width={width - NUM - 9} flexShrink={0} overflow="hidden">
+                <Text bold wrap="truncate-end">
+                  {a.type}
                 </Text>
               </Box>
-            ) : (
-              <Box width={num + 8} justifyContent="flex-end">
+              <Box width={9} flexShrink={0} justifyContent="flex-end">
                 <Text
-                  tabular
-                  color={a.status === 'completed' ? undefined : 'red'}
+                  color={
+                    a.status === 'running'
+                      ? 'yellow'
+                      : a.status === 'completed'
+                        ? undefined
+                        : 'red'
+                  }
+                  dimColor={a.status === 'completed'}
                 >
-                  {`${a.status === 'completed' ? '' : `${a.status} `}${formatMs(a.ms ?? 0)}`}
+                  {a.status === 'completed' ? 'done' : a.status}
                 </Text>
               </Box>
-            )}
+              {num(
+                formatMs(a.ms ?? Math.max(0, now - a.startedAt)),
+                NUM,
+                { bold: true },
+              )}
+            </Box>
+            {detail(`agent-d-${a.id}`, a.description, 2)}
           </Box>
         ))}
 
         {value.slowest.length > 0 && heading('Slowest calls')}
         {value.slowest.map((c, i) => (
-          <Box key={`slow-${c.id}`} flexDirection="row">
-            <Box width={3}>
-              <Text dimColor>{`${i + 1}.`}</Text>
-            </Box>
-            <Box flexGrow={1} flexShrink={1}>
-              <Text wrap="truncate-end">
-                <Text color={c.isError ? 'red' : undefined}>{c.tool}</Text>
-                <Text dimColor>
-                  {c.agentType === undefined ? '' : ` [${c.agentType}]`}
-                  {c.label === '' ? '' : `  ${c.label}`}
+          <Box key={`slow-${c.id}`} flexDirection="column">
+            <Box flexDirection="row" width={width}>
+              <Box width={RANK} flexShrink={0}>
+                <Text dimColor tabular>{`${i + 1}.`}</Text>
+              </Box>
+              <Box width={width - RANK - NUM} flexShrink={0} overflow="hidden">
+                <Text wrap="truncate-end">
+                  {toolName(c.tool, c.isError ? 'red' : undefined)}
+                  {c.agentType === undefined ? (
+                    ''
+                  ) : (
+                    <Text dimColor>{` in ${c.agentType}`}</Text>
+                  )}
                 </Text>
-              </Text>
+              </Box>
+              {num(formatMs(c.ms), NUM, { bold: true })}
             </Box>
-            {cell(formatMs(c.ms), num, true)}
+            {detail(`slow-d-${c.id}`, c.label, RANK)}
           </Box>
         ))}
 

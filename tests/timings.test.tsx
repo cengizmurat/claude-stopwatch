@@ -77,7 +77,7 @@ test('the panel shows totals per tool, subagents and the slowest calls', async (
 
     expect((await ui.find({ type: 'Text', text: /^4$/ }))?.text).toBe('4')
     expect((await ui.find({ type: 'Text', text: /^6\.3s$/ }))?.text).toBe('6.3s')
-    expect(await ui.find({ type: 'Text', text: /Grep \(1 failed\)/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^ 1 failed$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Find the config/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /^1m 5s$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /npm run build/ })).toBeTruthy()
@@ -143,4 +143,42 @@ test('the sort button moves to the next order', async ($, on) => {
 
   expect((await ui.find({ key: 'sort' }))?.text).toBe('sorted by calls')
   await ui.unmount()
+})
+
+test('long MCP names and paths are shortened', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.classic.PostToolUse({
+    tool_name: 'mcp__claude-code-remote__register_repo_root',
+    tool_use_id: 'm1',
+    tool_input: {},
+    tool_response: {},
+    duration_ms: 199,
+  })
+  await $.classic.PostToolUse({
+    tool_name: 'Read',
+    tool_use_id: 'r1',
+    tool_input: { file_path: '/root/.claude/dev-mods/abc/tool-timings/hooks/register.tsx' },
+    tool_response: {},
+    duration_ms: 6,
+  })
+  await $.classic.PostToolUse({
+    tool_name: 'Bash',
+    tool_use_id: 'b1',
+    tool_input: { command: 'git remote add origin https://github.com/a/b/c/d' },
+    tool_response: {},
+    duration_ms: 50,
+  })
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Text', text: /^register_repo_root claude-code-remote$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^ claude-code-remote$/ })).toBeTruthy()
+    expect((await ui.find({ type: 'Text', text: /register\.tsx$/ }))?.text).toBe('…/hooks/register.tsx')
+    expect(await ui.find({ type: 'Text', text: /^git remote add origin https:\/\/github\.com\/a\/b\/c\/d$/ })).toBeTruthy()
+    await ui.unmount()
+  }
 })

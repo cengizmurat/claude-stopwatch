@@ -10,28 +10,34 @@ The plugin is named `tool-timings`.
 
 ```
  Tool timings
- ─────────────────────────────────────────────────────────
+ ──────────────────────────────────────────────────────────────────
  42 calls · 3m 18s tool time · 2 subagents
 
  Running now
- Bash  npm run test:e2e                              12.4s
+ Bash                                                         12.4s
+   npm run test:e2e
 
- By tool                              sorted by total time
- Tool                    Calls    Total     Avg      Max
- Bash                       14   2m 31s   10.8s    48.2s
- Agent                       2    31.0s   15.5s    22.1s
- WebFetch                    3     9.7s    3.2s     5.0s
- Read                       17     1.2s    71ms    240ms
- Grep (1 failed)             6     0.6s   100ms    310ms
+ By tool                                       sorted by total time
+ Tool                    Calls    Total  Share     Avg      Max
+ Bash                       14   2m 31s    76%   10.8s    48.2s
+ Agent                       2    31.0s    16%   15.5s    22.1s
+ list_issues Linear          3     9.7s     5%    3.2s     5.0s
+ Read                       17     1.2s     1%    71ms    240ms
+ Grep 1 failed               6     0.6s     0%   100ms    310ms
 
  Subagents
- Explore  Find the auth config                       22.1s
- Plan  Plan the database migration           failed 8.9s
+ Explore                                             done     22.1s
+   Find the auth config
+ Plan                                              failed      8.9s
+   Plan the database migration
 
  Slowest calls
- 1. Bash  npm run build                              48.2s
- 2. Bash  pytest tests/integration                   31.5s
- 3. Agent  Find the auth config                      22.1s
+ 1.  Bash                                                     48.2s
+     npm run build
+ 2.  Bash                                                     31.5s
+     pytest tests/integration
+ 3.  Agent                                                    22.1s
+     Find the auth config
 ```
 
 ## Why
@@ -39,6 +45,34 @@ The plugin is named `tool-timings`.
 Some sessions feel slow, but it is hard to tell why. Is it a slow test
 command, a large search, a web fetch, or a subagent that ran for minutes?
 This panel tells you right away, while the session runs.
+
+## Above the prompt and in the status line
+
+You do not need the panel open to see what is slow.
+
+**The band above the prompt**, while Claude works, lists what runs right
+now, with times that tick every second, and counts this turn:
+
+```
+⏱ Working · this turn 6 calls, 14.2s in tools, 1 subagent           48.0s
+  Bash  npm run test:e2e                                             12.4s
+  Explore  Find the auth config                                      31.0s
+```
+
+When the turn ends, it becomes one line that sums the turn up, with
+**Details** (opens the panel) and **Hide** buttons:
+
+```
+⏱ Last turn 1m 12s · 14 calls · 38.0s in tools · slowest Bash 31.0s  npm run build   Details  Hide
+```
+
+**The status line** always shows the session totals and the slowest call.
+While something runs, it shows that first, with its live time:
+
+```
+⏱ 42 calls · 3m 18s in tools · slowest Bash 48.2s
+⏱ Bash 12.4s, Explore 31.0s │ 42 calls · 3m 18s in tools
+```
 
 ## Features
 
@@ -89,6 +123,8 @@ window is too narrow for it to open on its own:
 | `/tool-timings` | Opens the panel. |
 | `/tool-timings summary` | Prints the same numbers as text in the chat. |
 | `/tool-timings reset` | Clears the log of the current session. |
+| `/tool-timings band off` | Stops using the band above the prompt, in every session. |
+| `/tool-timings band on` | Uses the band again. |
 
 The panel also has a button at the bottom to clear the current session's
 log.
