@@ -63,7 +63,6 @@ test('a question is time spent waiting for you, not tool time', async ($, on) =>
     expect(await ui.find({ type: 'Text', text: /Waiting for you$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /· 🙋 45\.0s waiting for you$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Questions$/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: /^Public or private\?$/ })).toBeTruthy()
     // Tool time holds only the Bash call.
     expect(await ui.find({ type: 'Text', text: /^⏱ 1 call · 300ms tool time/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /AskUserQuestion/ })).toBeUndefined()
@@ -84,11 +83,6 @@ test('a permission prompt counts from the prompt to the tool start', async ($, o
     tool_input: { command: 'npm publish' },
   })
 
-  // Waiting now: the running call says so.
-  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /^💻 Bash · 🙋 waiting for you$/ })).toBeTruthy()
-  await ui.unmount()
-
   // 20 seconds to say yes, then the tool runs for 2 seconds.
   await clock.advance(22_000)
   await $.classic.PostToolUse({
@@ -99,9 +93,8 @@ test('a permission prompt counts from the prompt to the tool start', async ($, o
     duration_ms: 2_000,
   })
 
-  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /Permission prompts$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /^Bash {2}npm publish$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /· 🙋 20\.0s waiting for you$/ })).toBeTruthy()
   await ui.unmount()
 })
@@ -128,7 +121,7 @@ test('a "no" at a permission prompt is shown as declined', async ($, on) => {
   })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /declined$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^🔐 Permission prompts · 🚫 1 declined$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /· 🙋 5\.0s waiting for you$/ })).toBeTruthy()
   await ui.unmount()
 })
@@ -165,6 +158,28 @@ test('a question counts from the start of the call, not the tool run', async ($,
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /· 🙋 8\.0s waiting for you$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /^Which version\?$/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('the panel has no "Running now" part and no "Most recent" list', async ($, on) => {
+  mock.clock(on, { now: 10_000 })
+  mock.store(on)
+  engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'sleep 30' })
+  await $.classic.PostToolUse({
+    tool_name: 'AskUserQuestion',
+    tool_use_id: 'q1',
+    tool_input: { questions: [{ question: 'Ready?' }] },
+    tool_response: {},
+    duration_ms: 3_000,
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Running now/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Most recent/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Ready\?/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Questions$/ })).toBeTruthy()
   await ui.unmount()
 })

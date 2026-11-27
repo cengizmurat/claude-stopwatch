@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
@@ -20,11 +21,16 @@ function bandOf(isWorking: boolean) {
   } as const
 }
 
-function engine(on: On) {
+type OpenAnswer = { value: { isPlaced: true } | { isPlaced: false; reason: string } }
+
+function engine(
+  on: On,
+  open: (e: unknown) => OpenAnswer = () => ({ value: { isPlaced: true } }),
+) {
   const statuses: Array<string | undefined> = []
   on('session.id', () => ({ value: 'sess-1' }))
   on('command.register', () => ({ value: { command: 'tool-timings' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_, e) => open(e))
   on('ui.status', (_, e) => {
     statuses.push(e.text)
     return { value: undefined }
@@ -178,4 +184,106 @@ test('"/tool-timings emoji off" draws plain text', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /^By tool$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /💻/ })).toBeUndefined()
   await ui.unmount()
+})
+
+test('the band stays for the whole turn, between calls too', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  mock.store(on)
+  engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 'turn-1' })
+  await clock.advance(3_000)
+
+  // Nothing runs, and the surface does not say Claude works: still shown.
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...bandOf(false), surface })
+    expect(await ui.find({ type: 'Text', text: /^⏳ Working/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^ {2}💭 Thinking…$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^3\.0s$/ })).toBeTruthy()
+    await ui.unmount()
+  }
+
+  await $.turn.complete({
+    answer: '',
+    durationMs: 3_000,
+    isAborted: false,
+    turnId: 'turn-1',
+    reason: 'answer',
+  })
+  const ui = await $.ui.mount({ ...bandOf(false), surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Working/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+async function finishedTurn($: Engine) {
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 'turn-1' })
+  await $.classic.PostToolUse({
+    tool_name: 'Bash',
+    tool_use_id: 'b1',
+    tool_input: { command: 'ls' },
+    tool_response: {},
+    duration_ms: 100,
+  })
+  await $.turn.complete({
+    answer: '',
+    durationMs: 1_000,
+    isAborted: false,
+    turnId: 'turn-1',
+    reason: 'answer',
+  })
+}
+
+test('"Details" brings the panel to the front', async ($, on) => {
+  mock.clock(on, { now: 10_000 })
+  mock.store(on)
+  const opens: unknown[] = []
+  engine(on, e => {
+    opens.push(e)
+    return { value: { isPlaced: true } }
+  })
+
+  await finishedTurn($)
+  const pane = await $.ui.mount({
+    plugin: 'tool-timings',
+    component: 'Pane',
+    requestId: 'tool-timings',
+    surface: 'desktop',
+    props: {
+      title: 'Tool timings',
+      isFocused: false,
+      bodyColumns: 70,
+      placement: 'dock',
+      scroll: { offset: 0, bodyRows: 10 },
+      view: {},
+    },
+  })
+  const ui = await $.ui.mount({ ...bandOf(false), surface: 'desktop' })
+  opens.length = 0
+  await ui.press({ key: 'band-details' })
+  await ui.unmount()
+  await pane.unmount()
+
+  expect(opens).toEqual([
+    expect.objectContaining({ id: 'tool-timings', focus: true }),
+  ])
+})
+
+test('"Details" says why when the panel cannot be shown', async ($, on) => {
+  mock.clock(on, { now: 10_000 })
+  mock.store(on)
+  const toasts: unknown[] = []
+  engine(on, () => ({ value: { isPlaced: false, reason: 'too narrow' } }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e)
+    return { value: undefined }
+  })
+
+  await finishedTurn($)
+  const ui = await $.ui.mount({ ...bandOf(false), surface: 'desktop' })
+  await ui.press({ key: 'band-details' })
+  await ui.unmount()
+
+  expect(JSON.stringify(toasts)).toContain('Tool timings panel is not shown: too narrow')
 })

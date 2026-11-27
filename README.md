@@ -13,11 +13,7 @@ The plugin is named `tool-timings`.
  ──────────────────────────────────────────────────────────────────
  ⏱ 42 calls · 3m 18s tool time · 2 subagents · 🙋 1m 5s waiting for you
 
- Running now
- Bash                                                         12.4s
-   npm run test:e2e
-
- By tool                                       sorted by total time
+ By tool
  Tool                    Calls    Total  Share     Avg      Max
  Bash                       14   2m 31s    76%   10.8s    48.2s
  Agent                       2    31.0s    16%   15.5s    22.1s
@@ -78,19 +74,17 @@ While something runs, it shows that first, with its live time:
 
 - **Totals per tool**: number of calls, total time, average and longest
   call. Failed calls are counted next to the tool name.
-- **Three sort orders**: press the "sorted by …" button to sort by total
-  time, number of calls, or slowest call.
+- **Sorted by total time**: the tool that took the most time in all comes
+  first.
 - **Subagents**: each subagent run with its type, its task, how long it
   ran, and whether it finished, failed or was stopped.
 - **Waiting for you**: a section of its own for the time Claude waits on
   you: ❓ questions (`AskUserQuestion`), 🔐 permission prompts (from the
   prompt to the moment the tool starts) and 📜 plan approvals. It shows
-  totals per kind and your 5 most recent waits, and marks a "no" at a
-  prompt as declined. This time is not counted as tool time.
+  totals per kind, and how many permission prompts got a "no". This time is not counted as tool time.
 - **Slowest tools**: the 10 slowest single tool calls, with the command, file or
   pattern they used. A call made inside a subagent shows the subagent type
   in brackets.
-- **Running now**: calls that have started and not finished yet.
 - **Colors and emojis**: each tool has an emoji (💻 Bash, 📖 Read,
   📝 Edit, 🔍 Grep, 🌐 web, 🤖 Agent, 🔌 MCP tools). Times are green when
   fast (under 2s), yellow in between, and red when slow (15s or more).

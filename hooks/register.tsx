@@ -10,7 +10,6 @@ import type {
   AgentRecord,
   BandMode,
   CallRecord,
-  SortKey,
   TimingLog,
   ToolStat,
   TurnStats,
@@ -25,7 +24,6 @@ const KEEP_SLOWEST = 10
 const KEEP_AGENTS = 50
 const KEEP_SESSIONS = 30
 const KEEP_WAITS = 20
-const SHOW_WAITS = 5
 
 // Tools whose whole run is the person answering: their time is the
 // person's, so it goes to "Waiting for you" and not to tool time.
@@ -42,7 +40,6 @@ const SHAPE = 'timing-log-1'
 const log = atom({ plugin: 'tool-timings', key: 'log' } as const, blank(''), {
   shape: SHAPE,
 })
-const sort = atom({ plugin: 'tool-timings', key: 'sort' } as const, 'total')
 const turn = atom(
   { plugin: 'tool-timings', key: 'turn' } as const,
   null as TurnStats | null,
@@ -156,11 +153,30 @@ async function change(
   }
 }
 
+// ---------- opening the panel on request ----------
+
+/**
+ * Brings the panel to the front, takes the keyboard to it and scrolls it to
+ * the top, so a press always does something visible even when the panel
+ * was already open. Answers why it is not shown, or undefined when it is.
+ */
+async function showPanel($: Dollar): Promise<string | undefined> {
+  const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
+  if (!opened.isPlaced) {
+    $.ui.toast(`Tool timings panel is not shown: ${opened.reason}`)
+    return opened.reason
+  }
+  await $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
+  return undefined
+}
+
 // ---------- live parts: the status line and the ticking clock ----------
 
 // Ticks once a second while a call or a subagent runs, so the elapsed times
 // in the band, the panel and the status line move. A reload stops it.
 let ticker: Timer | undefined
+// The most rows the band showed under its header in the current turn.
+let bandPeak = { turnKey: -1, rows: 1 }
 
 function runningAgents(value: TimingLog): AgentRecord[] {
   return value.agents.filter(a => a.status === 'running')
@@ -206,8 +222,11 @@ async function updateStatus($: Dollar): Promise<void> {
 
 async function refreshLive($: Dollar): Promise<void> {
   const value = await read($, log)
+  const t = await read($, turn)
   const isRunning =
-    Object.keys(value.running).length > 0 || runningAgents(value).length > 0
+    Object.keys(value.running).length > 0 ||
+    runningAgents(value).length > 0 ||
+    (t !== null && !t.isDone)
   if (isRunning && ticker === undefined) {
     ticker = $.clock.every(1000, () => {
       $.ui.invalidate('ui.render')
@@ -347,6 +366,7 @@ function addWait(value: TimingLog, wait: WaitRecord): TimingLog {
           count: old.count + 1,
           totalMs: old.totalMs + wait.ms,
           maxMs: Math.max(old.maxMs, wait.ms),
+          declined: (old.declined ?? 0) + (wait.outcome === 'declined' ? 1 : 0),
         },
       },
       recent: [...waits.recent.filter(w => w.id !== wait.id), wait].slice(
@@ -517,25 +537,9 @@ function formatMs(ms: number): string {
   return `${minutes}m ${seconds}s`
 }
 
-const SORT_LABEL: Record<SortKey, string> = {
-  total: 'total time',
-  count: 'calls',
-  max: 'slowest call',
-}
-const NEXT_SORT: Record<SortKey, SortKey> = {
-  total: 'count',
-  count: 'max',
-  max: 'total',
-}
-
-function sortedTools(
-  value: TimingLog,
-  by: SortKey,
-): Array<[string, ToolStat]> {
-  const rows = Object.entries(value.tools)
-  const key = (s: ToolStat) =>
-    by === 'count' ? s.count : by === 'max' ? s.maxMs : s.totalMs
-  return rows.sort((a, b) => key(b[1]) - key(a[1]))
+/** The tools, the most total time first. */
+function sortedTools(value: TimingLog): Array<[string, ToolStat]> {
+  return Object.entries(value.tools).sort((a, b) => b[1].totalMs - a[1].totalMs)
 }
 
 const WAIT_KINDS: WaitKind[] = ['question', 'permission', 'plan']
@@ -550,7 +554,7 @@ const WAIT_EMOJI: Record<WaitKind, string> = {
   plan: '📜',
 }
 
-function textSummary(value: TimingLog, by: SortKey): string {
+function textSummary(value: TimingLog): string {
   if (value.totalCalls === 0 && value.agents.length === 0) {
     return 'No tool calls timed yet in this session.'
   }
@@ -559,7 +563,7 @@ function textSummary(value: TimingLog, by: SortKey): string {
     '',
     'By tool:',
   ]
-  for (const [tool, s] of sortedTools(value, by)) {
+  for (const [tool, s] of sortedTools(value)) {
     lines.push(
       `  ${tool}: ${s.count} calls, ${formatMs(s.totalMs)} total, avg ${formatMs(s.totalMs / s.count)}, max ${formatMs(s.maxMs)}`,
     )
@@ -664,10 +668,15 @@ export const register: Register = on => {
       }
     }
     if (arg === 'summary') {
-      return { text: textSummary(await read($, log), await read($, sort)) }
+      return { text: textSummary(await read($, log)) }
     }
-    await $.ui.open({ id: PANE, title: TITLE })
-    return { text: 'Tool timings panel opened.' }
+    const reason = await showPanel($)
+    return {
+      text:
+        reason === undefined
+          ? 'Tool timings panel opened.'
+          : `The tool timings panel is open but not shown: ${reason}`,
+    }
   })
 
   // Tool calls. The classic hook events are only watched here: hooking
@@ -782,6 +791,7 @@ export const register: Register = on => {
         isDone: false,
         isHidden: false,
       }))
+      await refreshLive($)
     }
 
     return next(e)
@@ -825,6 +835,7 @@ export const register: Register = on => {
       await update($, turn, t =>
         t === null ? t : { ...t, isDone: true, durationMs: e.durationMs },
       )
+      await refreshLive($)
     }
 
     return next(e)
@@ -908,11 +919,23 @@ export const register: Register = on => {
         ms: Math.max(0, now - a.startedAt),
       })),
     ]
-    const isLive = live.length > 0 || (e.props.isWorking && t !== null && !t.isDone)
+    // The band stays for the whole turn: from our own turn.start to its
+    // turn.complete, or while the surface says Claude works, or while
+    // anything runs. Between calls it says "Thinking" instead of going away.
+    const isTurnRunning = t !== null && !t.isDone
+    const isLive = live.length > 0 || isTurnRunning || e.props.isWorking
     const { Box, Text, Button } = $.ui.resolve(e)
 
     if (isLive) {
       const shown = live.slice(0, BAND_ROWS)
+      const hasMore = live.length > shown.length
+      // Rows under the header: never fewer than the most this turn has
+      // shown, so the band does not jump up and down as calls come and go.
+      const turnKey = t?.startedAt ?? 0
+      const used = Math.max(1, shown.length) + (hasMore ? 1 : 0)
+      if (bandPeak.turnKey !== turnKey) bandPeak = { turnKey, rows: 1 }
+      bandPeak.rows = Math.max(bandPeak.rows, used)
+      const padding = bandPeak.rows - used
 
       return (
         <Box flexDirection="column" width={width}>
@@ -947,6 +970,9 @@ export const register: Register = on => {
               </Text>
             </Box>
           </Box>
+          {shown.length === 0 && (
+            <Text dimColor wrap="truncate-end">{`  ${useEmoji ? '💭 ' : ''}Thinking…`}</Text>
+          )}
           {shown.map(item => (
             <Box key={item.key} flexDirection="row" width={width}>
               <Box width={width - NUM} flexShrink={0} overflow="hidden">
@@ -962,9 +988,12 @@ export const register: Register = on => {
               </Box>
             </Box>
           ))}
-          {live.length > shown.length && (
+          {hasMore && (
             <Text dimColor>{`  +${live.length - shown.length} more running`}</Text>
           )}
+          {Array.from({ length: padding }, (_, i) => (
+            <Box key={`pad-${i}`} height={1} />
+          ))}
         </Box>
       )
     }
@@ -1013,9 +1042,7 @@ export const register: Register = on => {
             key="band-details"
             plain
             label="Details"
-            onPress={async () => {
-              await $.ui.open({ id: PANE, title: TITLE })
-            }}
+            onPress={() => showPanel($)}
           />
           <Button
             key="band-hide"
@@ -1036,7 +1063,6 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const value = await read($, log)
-    const by = await read($, sort)
     const useEmoji = (await read($, emoji)) === 'on'
     const now = await $.clock.now()
     const icon = (glyph: string) => (useEmoji ? `${glyph} ` : '')
@@ -1055,16 +1081,12 @@ export const register: Register = on => {
     const kindWidth = width - CALLS - NUM * (showAvg ? 3 : 2)
     const waits = value.waits
 
-    const tools = sortedTools(value, by)
-    const running = Object.entries(value.running).sort(
-      (a, b) => a[1].startedAt - b[1].startedAt,
-    )
+    const tools = sortedTools(value)
     const agents = [...value.agents].reverse()
     const isEmpty =
       value.totalCalls === 0 &&
       agents.length === 0 &&
-      (value.waits?.recent.length ?? 0) === 0 &&
-      running.length === 0
+      (value.waits?.recent.length ?? 0) === 0
 
     const num = (
       text: string,
@@ -1146,41 +1168,7 @@ export const register: Register = on => {
           </Box>
         )}
 
-        {running.length > 0 && heading('⚡', 'Running now')}
-        {running.map(([id, r]) => {
-          const ms = Math.max(0, now - r.startedAt)
-          return (
-            <Box key={`run-${id}`} flexDirection="column">
-              <Box flexDirection="row" width={width}>
-                <Box width={width - NUM} flexShrink={0} overflow="hidden">
-                  <Text wrap="truncate-end">
-                    {toolName(r.tool)}
-                    {HUMAN_TOOLS[r.tool] !== undefined || r.askedAt !== undefined ? (
-                      <Text color="permission">{` · ${icon('🙋')}waiting for you`}</Text>
-                    ) : (
-                      ''
-                    )}
-                  </Text>
-                </Box>
-                {num(formatMs(ms), NUM, { bold: true, color: speedColor(ms) })}
-              </Box>
-              {detail(`run-d-${id}`, r.label, 3)}
-            </Box>
-          )
-        })}
-
-        {tools.length > 0 &&
-          heading(
-            '🧰',
-            'By tool',
-            <Button
-              key="sort"
-              plain
-              dimColor
-              label={`sorted by ${SORT_LABEL[by]}`}
-              onPress={() => update($, sort, s => NEXT_SORT[s])}
-            />,
-          )}
+        {tools.length > 0 && heading('🧰', 'By tool')}
         {tools.length > 0 && (
           <Box flexDirection="row" width={width}>
             <Box width={nameWidth} flexShrink={0}>
@@ -1265,6 +1253,11 @@ export const register: Register = on => {
                   <Box width={kindWidth} flexShrink={0} overflow="hidden">
                     <Text wrap="truncate-end">
                       {`${icon(WAIT_EMOJI[kind])}${WAIT_LABEL[kind]}`}
+                      {(w.declined ?? 0) > 0 ? (
+                        <Text color="error">{` · ${icon('🚫')}${w.declined} declined`}</Text>
+                      ) : (
+                        ''
+                      )}
                     </Text>
                   </Box>
                   {num(String(w.count), CALLS, { color: 'suggestion' })}
@@ -1274,30 +1267,6 @@ export const register: Register = on => {
                 </Box>
               )
             })}
-            <Box marginTop={1}>
-              <Text dimColor>Most recent</Text>
-            </Box>
-            {[...waits.recent]
-              .reverse()
-              .slice(0, SHOW_WAITS)
-              .map(w => (
-                <Box key={`wait-${w.id}`} flexDirection="column">
-                  <Box flexDirection="row" width={width}>
-                    <Box width={width - NUM} flexShrink={0} overflow="hidden">
-                      <Text wrap="truncate-end">
-                        {`${icon(WAIT_EMOJI[w.kind])}${WAIT_LABEL[w.kind].replace(/s$/, '')}`}
-                        {w.outcome === 'declined' ? (
-                          <Text color="error">{` · ${icon('🚫')}declined`}</Text>
-                        ) : (
-                          ''
-                        )}
-                      </Text>
-                    </Box>
-                    {num(formatMs(w.ms), NUM, { bold: true, color: 'permission' })}
-                  </Box>
-                  {detail(`wait-d-${w.id}`, w.label, useEmoji ? 3 : 2)}
-                </Box>
-              ))}
           </Box>
         )}
 

@@ -83,7 +83,6 @@ test('the panel shows totals per tool, subagents and the slowest tools', async (
     expect(await ui.find({ type: 'Text', text: /Find the config/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /^1m 5s$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /npm run build/ })).toBeTruthy()
-    expect((await ui.find({ key: 'sort' }))?.text).toBe('sorted by total time')
     await ui.unmount()
   }
 })
@@ -127,23 +126,35 @@ test('a new session starts with an empty log', async ($, on) => {
   await ui.unmount()
 })
 
-test('the sort button moves to the next order', async ($, on) => {
+test('tools are listed by total time, with no sort button', async ($, on) => {
   mock.clock(on)
   mock.store(on)
   engine(on)
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // Read is called more often, but Bash takes more time in all.
+  for (const id of ['r1', 'r2', 'r3']) {
+    await $.classic.PostToolUse({
+      tool_name: 'Read',
+      tool_use_id: id,
+      tool_input: { file_path: 'a.ts' },
+      tool_response: {},
+      duration_ms: 100,
+    })
+  }
   await $.classic.PostToolUse({
     tool_name: 'Bash',
-    tool_use_id: 'x',
-    tool_input: { command: 'ls' },
+    tool_use_id: 'b1',
+    tool_input: { command: 'make' },
     tool_response: {},
-    duration_ms: 10,
+    duration_ms: 5_000,
   })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'sort' })
+  const rows = await ui.findAll({ type: 'Text', text: /^(💻 Bash|📖 Read)$/ })
 
-  expect((await ui.find({ key: 'sort' }))?.text).toBe('sorted by calls')
+  expect(rows[0]?.text).toBe('💻 Bash')
+  expect(await ui.find({ key: 'sort' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /sorted by/ })).toBeUndefined()
   await ui.unmount()
 })
 

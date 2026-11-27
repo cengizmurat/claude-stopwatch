@@ -48,6 +48,8 @@ export type WaitStat = {
   count: number
   totalMs: number
   maxMs: number
+  /** How many were a "no"; absent in logs saved before it was counted. */
+  declined?: number
 }
 
 /** The times Claude waited for the person in one session. */
@@ -82,8 +84,6 @@ export type TimingLog = {
   waits?: WaitLog
 }
 
-export type SortKey = 'total' | 'count' | 'max'
-
 /** The numbers of the current (or last) turn of the main conversation. */
 export type TurnStats = {
   startedAt: number
@@ -105,7 +105,6 @@ declare module 'claude-code' {
   interface PluginState {
     'tool-timings': {
       log: Shaped<TimingLog>
-      sort: SortKey
       turn: TurnStats | null
       band: BandMode
       /** Whether emojis are drawn next to tools, headings and states. */
