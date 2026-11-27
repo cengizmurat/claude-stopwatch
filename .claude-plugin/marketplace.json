@@ -1,0 +1,13 @@
+{
+  "name": "claude-stopwatch",
+  "description": "A side panel for Claude Code that times every tool call and subagent",
+  "owner": {
+    "name": "cengizmurat"
+  },
+  "plugins": [
+    {
+      "name": "tool-timings",
+      "source": "./"
+    }
+  ]
+}
